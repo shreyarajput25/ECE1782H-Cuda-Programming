@@ -1,0 +1,274 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include<math.h>
+#include<sys/time.h>
+
+double getTimeStamp() //time function
+{
+struct timeval tv;
+gettimeofday(&tv, NULL);
+return (double) tv.tv_usec/1000000+ tv.tv_sec;
+}
+
+__global__ void add(float *mat1, float *mat2, float *result, int nx, int ny) //kernel/GPU
+{
+int idx;
+int ix = threadIdx.x+ blockIdx.x*blockDim.x;
+int iy = threadIdx.y+ blockIdx.y*blockDim.y;
+idx = iy*nx + ix;
+
+   if((ix<nx)&&(iy<ny))
+   {
+     result[idx] = mat1[idx] + mat2[idx] ;
+	}
+}
+
+int padding_sizex(int nx, int blocksizeX) //Size of Width/columns of matrix after padding 
+{
+int paddingsizex, upper;
+   if(nx<=blocksizeX) //if width of matrix is less than the width of the block.
+     {
+	 paddingsizex = blocksizeX;
+     }
+   if (nx>blocksizeX) //if width of matrix is greater than the width of the block.
+     {
+        if((nx%blocksizeX) == 0) //if width of matrix is multiple of the width block.
+        {
+        paddingsizex =nx;
+        }
+        if((nx%blocksizeX)!= 0) //if width of matrix is not multiple of the width block.
+        {
+        upper  = (nx/blocksizeX);
+        paddingsizex = blocksizeX *( upper + 1);
+        }
+	 }
+return paddingsizex;
+}
+
+int padding_sizey(int ny, int blocksizeY) //Size of Height/row of matrix after padding
+{
+int paddingsizey, upper;
+
+    if(ny<= blocksizeY) //if height of matrix is less than the height of the block.
+    {paddingsizey = blocksizeY;
+    }
+    if (ny>blocksizeY)
+    {
+       if((ny%blocksizeY) == 0)
+       {
+        paddingsizey =ny;
+        }
+       if((ny%blocksizeY)!= 0) //if height of matrix is not multiple of the height block.
+    {
+        upper  = (ny/blocksizeY);
+       paddingsizey = blocksizeY*( upper + 1);
+    }
+	}
+return paddingsizey; 
+}
+
+//
+int* min_padding(int threads_per_block, int nx, int ny, int *array)
+{
+array[4] = 0; //stores the value of minimum extra space/blocks required for pdding
+array[0] =0; //stores Dimension of the block(Width)
+array[1] = 0; //stores Dimension of the block(Height)
+    for (int i = threads_per_block ; i >0; i=i/2)//we calculate the multiples of threads_per_block and select the one with lowest padding cost.
+	{
+        if (threads_per_block % i == 0) 
+        { 
+		   int x = i; //mutliple of block size
+           int y = threads_per_block/i; //second multiple of block size
+           int pad_sizex = (padding_sizex(nx, x));
+           int pad_sizey = (padding_sizey(ny, y));
+           int padx = pad_sizex - nx;
+           int pady = pad_sizey - ny;
+           int total_pad = pad_sizex*pad_sizex-nx*ny; //extra padding cost
+                 if (array[4] == 0)
+                     {
+                        array[4] = total_pad;
+                        array[0]= x;
+                        array[1]= y;
+                        array[2] = pad_sizex;
+                        array[3] = pad_sizey;
+                     }
+                 if ((total_pad<=array[4]) && ((ny/array[1])>65535)) //update to get minimum of all extra padding costs.
+                     {
+                        array[4] = total_pad;
+                        array[0]= x; //Width of block
+                        array[1]= y; //height of block
+                        array[2] = pad_sizex; //Width of block after padding
+                        array[3] = pad_sizey; //height of block after padding
+                             if(array[4] ==0)
+                              break;
+                     }
+        }
+    }
+        return array;
+}
+
+int array[5]; //array contains: [0] :Width of block, [1]: height of block, [2]: Width of block after padding, [3]: height of block after padding, [4]: minimum padding cost
+void bestblockdim(int nx, int ny)
+{
+    int array1[5];
+    int array2[5];
+    int array3[5];
+	
+    int* ptr1024 = min_padding(1024,nx,ny,array1);
+    int* ptr512 = min_padding(512,nx,ny,array2);
+    int* ptr256 = min_padding(256,nx,ny,array3);
+    
+    if((array1[4]<array2[4]) && (array1[4]<array3[4]))
+    {
+        for(int i = 0;i<6;i++)
+        array[i] = array1[i];
+    }
+    if(array2[4] < array3[4])
+    {
+        for(int i = 0;i<6;i++)
+        array[i] = array2[i];
+    }
+    else
+    {
+	    for(int i = 0;i<6;i++)
+        array[i] = array3[i];
+    }
+	// if ((ny/array[1])>65535)
+	// {
+		// array[0]=1;
+		// array[1]=1024;
+		// array[2]=nx;
+		// int d=ny%1024;
+		// if(d==0)
+		// {array[3]=ny;
+		// }
+		// else
+		// {
+		// array[3]= ny+(1024- d);}
+		// array[4]=array[2]*array[3]-nx*ny;
+		// }
+}
+
+//Fill the matrix elements along with the padding 
+void intialmatrix(float *Matrix1,float *Matrix2,int ny, int nx, int width_Padding, int height_Padding)
+{
+int i,j;
+
+
+   for(i=0;i<height_Padding;i++)
+     {
+        for(j=0;j<width_Padding;j++)
+          {
+		  if((i<height_Padding)&&(j<width_Padding))
+           {
+            Matrix1[width_Padding*i+j] = (float)(i+j)/3.0;//fill in the elements
+            Matrix2[width_Padding*i+j] = (float)(i+j)*3.14;
+           }
+		  else
+		   {
+		    Matrix1[width_Padding*i+j] = 0;//padding
+            Matrix2[width_Padding*i+j] = 0;
+		   }  
+         }
+      }
+}
+
+//matrix addition CPU side
+void mat_add(float *mat1, float *mat2, float *result, int nx, int ny)
+{
+int i,j;
+   for(i=0;i<ny;i++)
+     {
+        for(j=0;j<nx;j++)
+          {
+           result[nx*i+j] = mat1[nx*i+j] + mat2[nx*i+j];
+          }
+     }
+
+}
+
+int main( int argc, char *argv[])
+{
+int size_x,size_y,bytes;
+int value =1;
+
+    if (argc !=3)
+	{
+	printf("Error: wrong number of args\n");
+	exit(0);
+    }
+    int ny= atoi(argv[1]);
+    int nx = atoi( argv[2]);
+
+    float *d_a, *d_b, *d_c;
+//intialise memory
+
+    bestblockdim(nx, ny);//we get array with best block size and padding size
+	int blockSizex = array[0];
+	int blockSizey = array[1];
+	size_x = array[2];// row size after padding
+	size_y = array[3];//column size after padding
+	int total_pad = array[4];
+	//printf("size of x: %d , y : %d after padd x: %d after padd y : %d, Total pad: %d,  Y dimension: %d, X dimention %d \n",blockSizex,blockSizey,size_x,size_y,total_pad,ny, nx); 
+	
+int noElems=size_x*size_y;
+bytes = noElems * sizeof(float) ;
+
+
+float *h_A, *h_B, *h_hC, *h_dC;//allocate memory
+cudaError_t status = cudaMallocHost((void**)&h_A, bytes);
+cudaError_t status1 = cudaMallocHost((void**)&h_B, bytes);
+cudaError_t status2= cudaMallocHost((void**)&h_hC, bytes); // CPU matrix addition result
+cudaError_t status3 = cudaMallocHost((void**)&h_dC, bytes);//GPU matrix addition result
+
+// printf("working till here");
+// /*
+intialmatrix(h_A,h_B, nx, ny, size_x, size_y);//fill the matrix
+
+
+mat_add(h_A ,h_B , h_hC, size_x, size_y); //cpu side addition
+
+
+cudaMalloc((void **)&d_a, bytes);
+cudaMalloc((void **)&d_b, bytes);
+cudaMalloc((void **)&d_c, bytes);
+double timeStamp1= getTimeStamp();
+
+cudaMemcpy(d_a, h_A, bytes, cudaMemcpyHostToDevice);
+cudaMemcpy(d_b, h_B, bytes, cudaMemcpyHostToDevice);
+double timeStamp2 = getTimeStamp();
+dim3 block(blockSizex, blockSizey) ; // you will want to configure this
+dim3 grid(size_x/blockSizex ,size_y/blockSizey) ;
+
+add<<<grid, block>>>(d_a, d_b, d_c, size_x, size_y);
+cudaDeviceSynchronize();
+double timeStamp3 = getTimeStamp();
+cudaMemcpy(h_dC ,d_c , bytes, cudaMemcpyDeviceToHost);
+double timeStamp4 = getTimeStamp();
+
+for (int i=0;i<size_y;i++)
+ {
+     for(int j=0;j<size_x;j++)
+      {
+	    if(h_hC[i*size_x+j]!=h_dC[i*size_x+j])
+		{
+			value=0;
+			break;
+	    }
+	  }
+}
+
+cudaFree(d_a); cudaFree(d_b); cudaFree(d_c);
+cudaDeviceReset();
+if(value == 0)
+{
+    printf("\nError: Incorrect Computation\n");
+}
+else
+{   
+float total = timeStamp4 - timeStamp1;
+printf("\n%.6f %.6f %.6f %.6f\n", total, timeStamp2-timeStamp1, timeStamp3-timeStamp2, timeStamp4-timeStamp3);
+}
+// */
+return 0;
+}
